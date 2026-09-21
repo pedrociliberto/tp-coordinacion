@@ -22,11 +22,55 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.partial_tops_by_client = {}
+        self.client_aggregation_counts = {}
+
+    def _process_global_top(self, client_id):
+        logging.info(f"[Join] All partial tops received for client: {client_id}")
+
+        all_items = self.partial_tops_by_client[client_id]
+        fruit_objects = [
+            fruit_item.FruitItem(fruit, amount)
+            for partial_top in all_items
+            for fruit, amount in partial_top
+        ]
+        fruit_objects.sort(key=lambda x: x.amount)
+        top_fruits = list(fruit_objects[-TOP_SIZE:])
+        top_fruits.reverse()
+
+        final_top = [
+            (fruit_item.fruit, fruit_item.amount) for fruit_item in top_fruits
+        ]
+        self.output_queue.send(
+            message_protocol.internal.serialize([client_id, final_top])
+        )
+
+        del self.partial_tops_by_client[client_id]
+        del self.client_aggregation_counts[client_id]
+
+    def _process_partial_top(self, client_id, fruit_top):
+        if client_id not in self.partial_tops_by_client:
+            self.partial_tops_by_client[client_id] = []
+            self.client_aggregation_counts[client_id] = 0
+        self.partial_tops_by_client[client_id].append(fruit_top)
+        self.client_aggregation_counts[client_id] += 1
+
+        count = self.client_aggregation_counts[client_id]
+        logging.info(
+            f"[Join] Received partial top for client: {client_id} "
+            f"({count}/{AGGREGATION_AMOUNT})"
+        )
+
+        if count < AGGREGATION_AMOUNT:
+            return
+        self._process_global_top(client_id)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
-        client_id, fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize([client_id, fruit_top]))
+        fields = message_protocol.internal.deserialize(message)
+        if len(fields) == 2:
+            client_id, fruit_top = fields
+            self._process_partial_top(client_id, fruit_top)
         ack()
 
     def start(self):
