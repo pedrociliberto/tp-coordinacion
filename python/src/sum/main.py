@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import threading
 import hashlib
 
@@ -23,6 +24,7 @@ class SumFilter:
         self.control_sender = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_ROUTING_KEY]
         )
+        self.control_receiver = None
         self.data_output_exchanges = []
         for i in range(AGGREGATION_AMOUNT):
             data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
@@ -30,6 +32,22 @@ class SumFilter:
             )
             self.data_output_exchanges.append(data_output_exchange)
         self.amount_by_client_and_fruit = {}
+
+        self.closed = False
+        self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info(f"[Sum {ID}] Received SIGTERM. Shutting down...")
+        self.closed = True
+        try:
+            self.input_queue.stop_consuming()
+            if self.control_receiver:
+                self.control_receiver.stop_consuming()
+        except Exception as e:
+            logging.error(f"[Sum {ID}] Error while stopping consumers: {e}")
+
+        if self._prev_sigterm_handler:
+            self._prev_sigterm_handler(signum, frame)
         
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data for client_id: {client_id}")
@@ -64,7 +82,6 @@ class SumFilter:
         if client_id in self.amount_by_client_and_fruit:
             del self.amount_by_client_and_fruit[client_id]
 
-
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
@@ -85,10 +102,14 @@ class SumFilter:
         ack()
 
     def _start_control_consumer(self):
-        control_receiver = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_ROUTING_KEY]
-        )
-        control_receiver.start_consuming(self.process_control_messsage)
+        try:
+            self.control_receiver = middleware.MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_ROUTING_KEY]
+            )
+            self.control_receiver.start_consuming(self.process_control_messsage)
+        except Exception as e:
+            if not self.closed:
+                logging.error(f"[Sum {ID}] Error in control thread: {e}")
 
     def start(self):
         control_thread = threading.Thread(
@@ -97,7 +118,11 @@ class SumFilter:
         )
         control_thread.start()
 
-        self.input_queue.start_consuming(self.process_data_messsage)
+        try:
+            self.input_queue.start_consuming(self.process_data_messsage)
+        except Exception as e:
+            if not self.closed:
+                logging.error(f"[Sum {ID}] Error in data consumer: {e}")
 
 def main():
     logging.basicConfig(level=logging.INFO)
