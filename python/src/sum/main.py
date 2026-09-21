@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import hashlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -40,7 +41,9 @@ class SumFilter:
         ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _aggregation_index(self, fruit):
-        return hash(fruit) % AGGREGATION_AMOUNT
+        hash_object = hashlib.md5(fruit.encode())
+        hash_value = int(hash_object.hexdigest(), 16)
+        return hash_value % AGGREGATION_AMOUNT
 
     def _process_eof(self, client_id):
         logging.info(f"[Sum {ID}] Flushing data to Aggregation for client: {client_id}")
