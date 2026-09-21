@@ -39,16 +39,20 @@ class SumFilter:
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
+    def _aggregation_index(self, fruit):
+        return hash(fruit) % AGGREGATION_AMOUNT
+
     def _process_eof(self, client_id):
         logging.info(f"[Sum {ID}] Flushing data to Aggregation for client: {client_id}")
         client_dict = self.amount_by_client_and_fruit.get(client_id, {})
         for final_fruit_item in client_dict.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client_id, final_fruit_item.fruit, final_fruit_item.amount]
-                    )
+            target_agg_index = self._aggregation_index(final_fruit_item.fruit)
+            data_output_exchange = self.data_output_exchanges[target_agg_index]
+            data_output_exchange.send(
+                message_protocol.internal.serialize(
+                    [client_id, final_fruit_item.fruit, final_fruit_item.amount]
                 )
+            )
 
         logging.info(f"[Sum {ID}] Sending SUM_EOF to Aggregation for client: {client_id}")
         for data_output_exchange in self.data_output_exchanges:
