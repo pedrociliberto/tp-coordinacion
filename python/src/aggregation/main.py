@@ -59,7 +59,7 @@ class AggregationFilter:
         if len(fields) == 3:
             self._process_data(*fields)
         else:
-            self._process_eof()
+            self._process_eof(*fields)
         ack()
 
     def start(self):
