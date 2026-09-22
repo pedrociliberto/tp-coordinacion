@@ -69,7 +69,7 @@ class AggregationFilter:
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
-        elif len(fields) == 2 and fields[1] == "SUM_EOF":
+        elif len(fields) == 1:
             client_id = fields[0]
             self._process_eof(client_id)
         ack()

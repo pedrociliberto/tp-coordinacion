@@ -24,7 +24,9 @@ class SumFilter:
         self.control_sender = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_ROUTING_KEY]
         )
-        self.control_receiver = None
+        self.control_receiver = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_ROUTING_KEY]
+        )
         self.data_output_exchanges = []
         for i in range(AGGREGATION_AMOUNT):
             data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
@@ -32,7 +34,7 @@ class SumFilter:
             )
             self.data_output_exchanges.append(data_output_exchange)
         self.amount_by_client_and_fruit = {}
-
+        self.state_lock = threading.Lock()
         self.closed = False
         self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
 
@@ -51,21 +53,19 @@ class SumFilter:
         
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data for client_id: {client_id}")
-        if client_id not in self.amount_by_client_and_fruit:
-            self.amount_by_client_and_fruit[client_id] = {}
-        client_dict = self.amount_by_client_and_fruit[client_id]
+        client_dict = self.amount_by_client_and_fruit.setdefault(client_id, {})
         client_dict[fruit] = client_dict.get(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _aggregation_index(self, fruit):
-        hash_object = hashlib.md5(fruit.encode())
-        hash_value = int(hash_object.hexdigest(), 16)
+        hash_object = hashlib.md5(fruit.encode("utf-8"))
+        hash_value = int.from_bytes(hash_object.digest()[:4], "big")
         return hash_value % AGGREGATION_AMOUNT
 
     def _process_eof(self, client_id):
         logging.info(f"[Sum {ID}] Flushing data to Aggregation for client: {client_id}")
-        client_dict = self.amount_by_client_and_fruit.get(client_id, {})
+        client_dict = self.amount_by_client_and_fruit.pop(client_id, {}) 
         for final_fruit_item in client_dict.values():
             target_agg_index = self._aggregation_index(final_fruit_item.fruit)
             data_output_exchange = self.data_output_exchanges[target_agg_index]
@@ -77,35 +77,31 @@ class SumFilter:
 
         logging.info(f"[Sum {ID}] Sending SUM_EOF to Aggregation for client: {client_id}")
         for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_id, "SUM_EOF"]))
-
-        if client_id in self.amount_by_client_and_fruit:
-            del self.amount_by_client_and_fruit[client_id]
+            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
-            self._process_data(*fields)
+            with self.state_lock:
+                self._process_data(*fields)
         else:
             client_id = fields[0]
             logging.info(f"[Sum {ID}] Received EOF from Gateaway. Broadcasting to control exchange...")
             self.control_sender.send(
-                message_protocol.internal.serialize([client_id, "EOF"])
+                message_protocol.internal.serialize([client_id])
             )
         ack()
 
     def process_control_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2 and fields[1] == "EOF":
+        if len(fields) == 1:
             client_id = fields[0]
-            self._process_eof(client_id)
+            with self.state_lock:
+                self._process_eof(client_id)
         ack()
 
     def _start_control_consumer(self):
         try:
-            self.control_receiver = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_ROUTING_KEY]
-            )
             self.control_receiver.start_consuming(self.process_control_messsage)
         except Exception as e:
             if not self.closed:
