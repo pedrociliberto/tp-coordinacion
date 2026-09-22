@@ -1,6 +1,6 @@
 import os
 import logging
-import bisect
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -25,6 +25,19 @@ class AggregationFilter:
         )
         self.amount_by_client_and_fruit = {}
         self.client_eof_counts = {}
+        self.closed = False
+        self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info(f"[Aggregation {ID}] Received SIGTERM. Shutting down...")
+        self.closed = True
+        try:
+            self.input_exchange.stop_consuming()
+        except Exception as e:
+            logging.error(f"[Aggregation {ID}] Error while stopping consumers: {e}")
+
+        if self._prev_sigterm_handler:
+            self._prev_sigterm_handler(signum, frame)
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
@@ -34,7 +47,6 @@ class AggregationFilter:
         client_dict[fruit] = client_dict.get(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
-
 
     def _process_eof(self, client_id):
         self.client_eof_counts[client_id] = self.client_eof_counts.get(client_id, 0) + 1
@@ -75,7 +87,11 @@ class AggregationFilter:
         ack()
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        try:
+            self.input_exchange.start_consuming(self.process_messsage)
+        except Exception as e:
+            if not self.closed:
+                logging.error(f"[Aggregation {ID}] Error while consuming messages: {e}")
 
 
 def main():
