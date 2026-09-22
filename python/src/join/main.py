@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -24,6 +25,19 @@ class JoinFilter:
         )
         self.partial_tops_by_client = {}
         self.client_aggregation_counts = {}
+        self.closed = False
+        self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("[Join] Received SIGTERM. Shutting down...")
+        self.closed = True
+        try:
+            if self.input_queue:
+                self.input_queue.stop_consuming()
+        except Exception as e:
+            logging.error(f"[Join] Error while stopping consumer: {e}")
+
+        signal.signal(signal.SIGTERM, self._prev_sigterm_handler)
 
     def _process_global_top(self, client_id):
         logging.info(f"[Join] All partial tops received for client: {client_id}")
@@ -74,8 +88,11 @@ class JoinFilter:
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
-
+        try:
+            self.input_queue.start_consuming(self.process_messsage)
+        except Exception as e:
+            if not self.closed:
+                logging.error(f"[Join] Error while consuming messages: {e}")
 
 def main():
     logging.basicConfig(level=logging.INFO)
