@@ -2,7 +2,7 @@ import os
 import logging
 import signal
 import threading
-import hashlib
+import zlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -52,16 +52,12 @@ class SumFilter:
             self._prev_sigterm_handler(signum, frame)
         
     def _process_data(self, client_id, fruit, amount):
-        logging.info(f"Process data for client_id: {client_id}")
         client_dict = self.amount_by_client_and_fruit.setdefault(client_id, {})
-        client_dict[fruit] = client_dict.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
+        new_item = fruit_item.FruitItem(fruit, int(amount))
+        client_dict[fruit] = client_dict.get(fruit, fruit_item.FruitItem(fruit, 0)) + new_item
 
     def _aggregation_index(self, fruit):
-        hash_object = hashlib.md5(fruit.encode("utf-8"))
-        hash_value = int.from_bytes(hash_object.digest()[:4], "big")
-        return hash_value % AGGREGATION_AMOUNT
+        return zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
 
     def _process_eof(self, client_id):
         logging.info(f"[Sum {ID}] Flushing data to Aggregation for client: {client_id}")
@@ -76,8 +72,9 @@ class SumFilter:
             )
 
         logging.info(f"[Sum {ID}] Sending SUM_EOF to Aggregation for client: {client_id}")
+        eof_msg = message_protocol.internal.serialize([client_id])
         for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
+            data_output_exchange.send(eof_msg)
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
@@ -86,7 +83,7 @@ class SumFilter:
                 self._process_data(*fields)
         else:
             client_id = fields[0]
-            logging.info(f"[Sum {ID}] Received EOF from Gateaway. Broadcasting to control exchange...")
+            logging.info(f"[Sum {ID}] Received EOF from Gateway. Broadcasting to control exchange...")
             self.control_sender.send(
                 message_protocol.internal.serialize([client_id])
             )
@@ -125,7 +122,6 @@ def main():
     sum_filter = SumFilter()
     sum_filter.start()
     return 0
-
 
 if __name__ == "__main__":
     main()
