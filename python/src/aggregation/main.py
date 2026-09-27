@@ -33,6 +33,8 @@ class AggregationFilter:
         self.closed = True
         try:
             self.input_exchange.stop_consuming()
+            self.input_exchange.close()
+            self.output_queue.close()
         except Exception as e:
             logging.error(f"[Aggregation {ID}] Error while stopping consumers: {e}")
 
