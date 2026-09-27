@@ -16,6 +16,8 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 SUM_ROUTING_KEY = "SUM_ROUTING_KEY"
 
+TIMEOUT_JOIN = 2.0
+
 class SumFilter:
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -42,13 +44,22 @@ class SumFilter:
         logging.info(f"[Sum {ID}] Received SIGTERM. Shutting down...")
         self.closed = True
         try:
-            self.input_queue.stop_consuming()
-            if self.control_receiver:
-                self.control_receiver.stop_consuming()
+            if self.control_receiver and hasattr(self.control_receiver, 'connection') and self.control_receiver.connection.is_open:
+                self.control_receiver.connection.add_callback_threadsafe(
+                    self.control_receiver.stop_consuming
+                )
         except Exception as e:
             logging.error(f"[Sum {ID}] Error while stopping consumers: {e}")
 
-        if self._prev_sigterm_handler:
+        try:
+            if self.input_queue and hasattr(self.input_queue, 'connection') and self.input_queue.connection.is_open:
+                self.input_queue.connection.add_callback_threadsafe(
+                    self.input_queue.stop_consuming
+                )
+        except Exception as e:
+            logging.error(f"[Sum {ID}] Error while stopping consumers: {e}")
+
+        if self._prev_sigterm_handler and callable(self._prev_sigterm_handler):
             self._prev_sigterm_handler(signum, frame)
         
     def _process_data(self, client_id, fruit, amount):
@@ -61,7 +72,7 @@ class SumFilter:
 
     def _process_eof(self, client_id):
         logging.info(f"[Sum {ID}] Flushing data to Aggregation for client: {client_id}")
-        client_dict = self.amount_by_client_and_fruit.pop(client_id, {}) 
+        client_dict = self.amount_by_client_and_fruit.pop(client_id) 
         for final_fruit_item in client_dict.values():
             target_agg_index = self._aggregation_index(final_fruit_item.fruit)
             data_output_exchange = self.data_output_exchanges[target_agg_index]
@@ -104,6 +115,34 @@ class SumFilter:
             if not self.closed:
                 logging.error(f"[Sum {ID}] Error in control thread: {e}")
 
+    def close(self):
+        logging.info(f"[Sum {ID}] Closing connections...")
+
+        try:
+            if self.control_receiver:
+                self.control_receiver.close()
+        except Exception as e:
+            logging.error(f"[Sum {ID}] Error while closing control receiver: {e}")
+
+        try:
+            if self.control_sender:
+                self.control_sender.close()
+        except Exception as e:
+            logging.error(f"[Sum {ID}] Error while closing control sender: {e}")
+
+        try:
+            if self.input_queue:
+                self.input_queue.close()
+        except Exception as e:
+            logging.error(f"[Sum {ID}] Error while closing input queue: {e}")
+
+        for idx, exchange in enumerate(self.data_output_exchanges):
+            try:
+                if exchange:
+                    exchange.close()
+            except Exception as e:
+                logging.error(f"[Sum {ID}] Error while closing data output exchange {idx}: {e}")
+
     def start(self):
         control_thread = threading.Thread(
             target=self._start_control_consumer,
@@ -116,6 +155,9 @@ class SumFilter:
         except Exception as e:
             if not self.closed:
                 logging.error(f"[Sum {ID}] Error in data consumer: {e}")
+        finally:
+            control_thread.join(timeout=TIMEOUT_JOIN)
+            self.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)
