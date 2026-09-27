@@ -163,33 +163,21 @@ class SumFilter:
             if not self.closed:
                 logging.error(f"[Sum {ID}] Error in control thread: {e}")
 
+    def _close_middleware_connection(self, middleware_connection):
+        try:
+            if middleware_connection:
+                middleware_connection.close()
+        except Exception as e:
+            logging.error(f"[Sum {ID}] Error while closing middleware connection: {e}")
+
     def close(self):
         logging.info(f"[Sum {ID}] Closing connections...")
 
-        try:
-            if self.control_receiver:
-                self.control_receiver.close()
-        except Exception as e:
-            logging.error(f"[Sum {ID}] Error while closing control receiver: {e}")
-
-        try:
-            if self.control_sender:
-                self.control_sender.close()
-        except Exception as e:
-            logging.error(f"[Sum {ID}] Error while closing control sender: {e}")
-
-        try:
-            if self.input_queue:
-                self.input_queue.close()
-        except Exception as e:
-            logging.error(f"[Sum {ID}] Error while closing input queue: {e}")
-
+        self._close_middleware_connection(self.control_receiver)
+        self._close_middleware_connection(self.control_sender)
+        self._close_middleware_connection(self.input_queue)
         for idx, exchange in enumerate(self.data_output_exchanges):
-            try:
-                if exchange:
-                    exchange.close()
-            except Exception as e:
-                logging.error(f"[Sum {ID}] Error while closing data output exchange {idx}: {e}")
+            self._close_middleware_connection(exchange)
 
     def start(self):
         control_thread = threading.Thread(
@@ -205,6 +193,8 @@ class SumFilter:
                 logging.error(f"[Sum {ID}] Error in data consumer: {e}")
         finally:
             control_thread.join(timeout=TIMEOUT_JOIN)
+            if control_thread.is_alive():
+                logging.warning(f"[Sum {ID}] Control thread did not finish in time.")
             self.close()
 
 def main():
