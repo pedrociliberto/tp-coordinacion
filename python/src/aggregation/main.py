@@ -13,6 +13,11 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
+DATA_MESSAGE_FIELDS = 3
+EOF_MESSAGE_FIELDS = 1
+
+INITIAL_COUNT = 0
+INITIAL_AMOUNT = 0
 
 class AggregationFilter:
 
@@ -43,12 +48,22 @@ class AggregationFilter:
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
-        if client_id not in self.amount_by_client_and_fruit:
-            self.amount_by_client_and_fruit[client_id] = {}
-        client_dict = self.amount_by_client_and_fruit[client_id]
+        client_dict = self.amount_by_client_and_fruit.setdefault(client_id, {})
         client_dict[fruit] = client_dict.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
+            fruit, fruit_item.FruitItem(fruit, INITIAL_AMOUNT)
         ) + fruit_item.FruitItem(fruit, int(amount))
+
+    def _calculate_top_fruits(self, client_dict):
+        fruit_items = list(client_dict.values())
+        fruit_items.sort(key=lambda x: x.amount)
+        fruit_chunk = list(fruit_items[-TOP_SIZE:])
+        fruit_chunk.reverse()
+        return list(
+            map(
+                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
+                fruit_chunk,
+            )
+        )
 
     def _process_eof(self, client_id):
         self.client_eof_counts[client_id] = self.client_eof_counts.get(client_id, 0) + 1
@@ -60,33 +75,31 @@ class AggregationFilter:
             return
         
         logging.info(f"[Aggregation {ID}] Received all SUM_EOF for client: {client_id}. Sending top...")
-
         client_dict = self.amount_by_client_and_fruit.get(client_id, {})
-
-        fruit_items = list(client_dict.values())
-        fruit_items.sort(key=lambda x: x.amount)
-        fruit_chunk = list(fruit_items[-TOP_SIZE:])
-        fruit_chunk.reverse()
-        fruit_top = list(
-            map(
-                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                fruit_chunk,
-            )
-        )
+        fruit_top = self._calculate_top_fruits(client_dict)
         self.output_queue.send(message_protocol.internal.serialize([client_id, fruit_top]))
-        if client_id in self.amount_by_client_and_fruit:
-            del self.amount_by_client_and_fruit[client_id]
-        del self.client_eof_counts[client_id]
+        self.client_eof_counts.pop(client_id, None)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 3:
+        if len(fields) == DATA_MESSAGE_FIELDS:
             self._process_data(*fields)
-        elif len(fields) == 1:
-            client_id = fields[0]
-            self._process_eof(client_id)
+        elif len(fields) == EOF_MESSAGE_FIELDS:
+            self._process_eof(fields[0])
         ack()
+
+    def _close_middleware_connections(self, middleware_connection):
+        try:
+            if middleware_connection:
+                middleware_connection.close()
+        except Exception as e:
+            logging.error(f"[Aggregation {ID}] Error while closing middleware connection: {e}")
+
+    def close(self):
+        logging.info(f"[Aggregation {ID}] Closing connections...")
+        self._close_middleware_connections(self.input_exchange)
+        self._close_middleware_connections(self.output_queue)
 
     def start(self):
         try:
@@ -94,6 +107,8 @@ class AggregationFilter:
         except Exception as e:
             if not self.closed:
                 logging.error(f"[Aggregation {ID}] Error while consuming messages: {e}")
+        finally:
+            self.close()
 
 
 def main():
