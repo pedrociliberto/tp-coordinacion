@@ -66,7 +66,7 @@ class AggregationFilter:
         )
 
     def _process_eof(self, client_id):
-        self.client_eof_counts[client_id] = self.client_eof_counts.get(client_id, 0) + 1
+        self.client_eof_counts[client_id] = self.client_eof_counts.get(client_id, INITIAL_COUNT) + 1
         logging.info(
             f"[Aggregation {ID}] Received SUM_EOF for client: {client_id} "
             f"({self.client_eof_counts[client_id]}/{SUM_AMOUNT})"

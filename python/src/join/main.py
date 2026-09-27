@@ -13,6 +13,8 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
+PARTIAL_TOP_MESSAGE_FIELDS = 2
+INITIAL_COUNT = 0
 
 class JoinFilter:
 
@@ -43,33 +45,30 @@ class JoinFilter:
         if self._prev_sigterm_handler:
             self._prev_sigterm_handler(signum, frame)
 
-    def _process_global_top(self, client_id):
-        logging.info(f"[Join] All partial tops received for client: {client_id}")
-
-        all_items = self.partial_tops_by_client[client_id]
+    def _calculate_global_top(self, all_partial_tops):
         fruit_objects = [
             fruit_item.FruitItem(fruit, amount)
-            for partial_top in all_items
+            for partial_top in all_partial_tops
             for fruit, amount in partial_top
         ]
         fruit_objects.sort(key=lambda x: x.amount)
         top_fruits = list(fruit_objects[-TOP_SIZE:])
         top_fruits.reverse()
+        return [(item.fruit, item.amount) for item in top_fruits]
 
-        final_top = [
-            (fruit_item.fruit, fruit_item.amount) for fruit_item in top_fruits
-        ]
+    def _process_global_top(self, client_id):
+        logging.info(f"[Join] All partial tops received for client: {client_id}")
+        all_partial_tops = self.partial_tops_by_client.pop(client_id, [])
+        final_top = self._calculate_global_top(all_partial_tops)
         self.output_queue.send(
             message_protocol.internal.serialize([client_id, final_top])
         )
-
-        del self.partial_tops_by_client[client_id]
-        del self.client_aggregation_counts[client_id]
+        self.client_aggregation_counts.pop(client_id, None)
 
     def _process_partial_top(self, client_id, fruit_top):
         if client_id not in self.partial_tops_by_client:
             self.partial_tops_by_client[client_id] = []
-            self.client_aggregation_counts[client_id] = 0
+            self.client_aggregation_counts[client_id] = INITIAL_COUNT
         self.partial_tops_by_client[client_id].append(fruit_top)
         self.client_aggregation_counts[client_id] += 1
 
@@ -79,17 +78,28 @@ class JoinFilter:
             f"({count}/{AGGREGATION_AMOUNT})"
         )
 
-        if count < AGGREGATION_AMOUNT:
-            return
-        self._process_global_top(client_id)
+        if count >= AGGREGATION_AMOUNT:
+            self._process_global_top(client_id)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
+        if len(fields) == PARTIAL_TOP_MESSAGE_FIELDS:
             client_id, fruit_top = fields
             self._process_partial_top(client_id, fruit_top)
         ack()
+
+    def _close_middleware_connections(self, middleware_connection):
+        try:
+            if middleware_connection:
+                middleware_connection.close()
+        except Exception as e:
+            logging.error(f"[Join] Error while closing middleware connection: {e}")
+
+    def close(self):
+        logging.info("[Join] Closing connections...")
+        self._close_middleware_connections(self.input_queue)
+        self._close_middleware_connections(self.output_queue)
 
     def start(self):
         try:
@@ -97,6 +107,8 @@ class JoinFilter:
         except Exception as e:
             if not self.closed:
                 logging.error(f"[Join] Error while consuming messages: {e}")
+        finally:
+            self.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)
