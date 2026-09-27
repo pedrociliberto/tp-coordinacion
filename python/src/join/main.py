@@ -34,10 +34,14 @@ class JoinFilter:
         try:
             if self.input_queue:
                 self.input_queue.stop_consuming()
+                self.input_queue.close()
+            if self.output_queue:
+                self.output_queue.close()
         except Exception as e:
             logging.error(f"[Join] Error while stopping consumer: {e}")
 
-        signal.signal(signal.SIGTERM, self._prev_sigterm_handler)
+        if self._prev_sigterm_handler:
+            self._prev_sigterm_handler(signum, frame)
 
     def _process_global_top(self, client_id):
         logging.info(f"[Join] All partial tops received for client: {client_id}")
