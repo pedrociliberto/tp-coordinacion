@@ -72,14 +72,9 @@ class SumFilter:
 
         if self._prev_sigterm_handler and callable(self._prev_sigterm_handler):
             self._prev_sigterm_handler(signum, frame)
-        
-    def _process_data(self, client_id, fruit, amount):
-        client_dict = self.amount_by_client_and_fruit.setdefault(client_id, {})
-        new_item = fruit_item.FruitItem(fruit, int(amount))
-        client_dict[fruit] = client_dict.get(fruit, fruit_item.FruitItem(fruit, INITIAL_AMOUNT)) + new_item
-        self.client_processed_counts[client_id] = self.client_processed_counts.get(client_id, INITIAL_COUNT) + 1
-        if client_id in self.pending_client_ids:
-            self._flush_client_data(client_id)
+
+    def _aggregation_index(self, fruit):
+        return zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
 
     def _flush_client_data(self, client_id):
         client_dict = self.amount_by_client_and_fruit.pop(client_id, {})
@@ -95,9 +90,47 @@ class SumFilter:
         self.control_sender.send(
             message_protocol.internal.serialize([client_id, messages_count])
         )
+        
+    def _process_data(self, client_id, fruit, amount):
+        client_dict = self.amount_by_client_and_fruit.setdefault(client_id, {})
+        new_item = fruit_item.FruitItem(fruit, int(amount))
+        client_dict[fruit] = client_dict.get(fruit, fruit_item.FruitItem(fruit, INITIAL_AMOUNT)) + new_item
+        self.client_processed_counts[client_id] = self.client_processed_counts.get(client_id, INITIAL_COUNT) + 1
+        if client_id in self.pending_client_ids:
+            self._flush_client_data(client_id)
 
-    def _aggregation_index(self, fruit):
-        return zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
+    def _handle_gateway_eof(self, client_id, total_messages):
+        logging.info(f"[Sum {ID}] Received EOF from Gateway (Total: {total_messages}). Broadcasting...")
+        with self.state_lock:
+            self.client_expected_totals[client_id] = (int(total_messages), INITIAL_COUNT)
+        self.control_sender.send(
+            message_protocol.internal.serialize([client_id])
+        )
+
+    def _start_client_report(self, client_id):
+        with self.state_lock:
+            self.pending_client_ids.add(client_id)
+            self._flush_client_data(client_id)
+
+    def _complete_client_eof(self, client_id):
+        logging.info(f"[Sum {ID}] Processing EOF completion for client: {client_id}")
+        with self.state_lock:
+            self.pending_client_ids.discard(client_id)
+        eof_msg = message_protocol.internal.serialize([client_id])
+        for data_output_exchange in self.data_output_exchanges:
+            data_output_exchange.send(eof_msg)
+
+    def _update_client_expected_total(self, client_id, amount_to_add):
+        with self.state_lock:
+            if client_id in self.client_expected_totals:
+                total_expected, current = self.client_expected_totals[client_id]
+                new_count = current + amount_to_add
+                self.client_expected_totals[client_id] = (total_expected, new_count)
+                if new_count >= total_expected:
+                    self.client_expected_totals.pop(client_id, None)
+                    self.control_sender.send(
+                        message_protocol.internal.serialize([client_id, EOF_ENDING])
+                    )
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
@@ -105,48 +138,21 @@ class SumFilter:
             with self.state_lock:
                 self._process_data(*fields)
         else:
-            client_id = fields[0]
-            total_messages = fields[1]
-            logging.info(f"[Sum {ID}] Received EOF from Gateway (Total: {total_messages}). Broadcasting...")
-            with self.state_lock:
-                self.client_expected_totals[client_id] = (int(total_messages), INITIAL_COUNT)
-            self.control_sender.send(
-                message_protocol.internal.serialize([client_id])
-            )
+            self._handle_gateway_eof(fields[0], fields[1])
         ack()
 
     def process_control_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
 
         if len(fields) == CONTROL_START_EOF_FIELDS:
-            client_id = fields[0]
-            with self.state_lock:
-                self.pending_client_ids.add(client_id)
-                self._flush_client_data(client_id)
-
+            self._start_client_report(fields[0])
         elif len(fields) == CONTROL_FRUIT_REPORT_FIELDS:
-            client_id = fields[0]
-            second_field = fields[1]
-        
+            client_id, second_field = fields[0], fields[1]
             if second_field == EOF_ENDING:
-                logging.info(f"[Sum {ID}] Processing EOF completion for client: {client_id}")
-                with self.state_lock:
-                    self.pending_client_ids.discard(client_id)
-                eof_msg = message_protocol.internal.serialize([client_id])
-                for data_output_exchange in self.data_output_exchanges:
-                    data_output_exchange.send(eof_msg)
+                self._complete_client_eof(client_id)
             else:
-                amount_to_add = second_field
-                with self.state_lock:
-                    if client_id in self.client_expected_totals:
-                        total_expected, current = self.client_expected_totals[client_id]
-                        new_count = current + amount_to_add
-                        self.client_expected_totals[client_id] = (total_expected, new_count)
-                        if new_count >= total_expected:
-                            self.client_expected_totals.pop(client_id, None)
-                            self.control_sender.send(
-                                message_protocol.internal.serialize([client_id, -1])
-                            )
+                amount_to_add = int(second_field)
+                self._update_client_expected_total(client_id, amount_to_add)
 
         ack()
 
