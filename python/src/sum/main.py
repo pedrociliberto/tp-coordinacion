@@ -18,6 +18,13 @@ SUM_ROUTING_KEY = "SUM_ROUTING_KEY"
 
 TIMEOUT_JOIN = 2.0
 
+DATA_MESSAGE_FIELDS = 3
+CONTROL_START_EOF_FIELDS = 1
+CONTROL_FRUIT_REPORT_FIELDS = 2
+INITIAL_AMOUNT = 0
+INITIAL_COUNT = 0
+EOF_ENDING = -1
+
 class SumFilter:
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -69,8 +76,8 @@ class SumFilter:
     def _process_data(self, client_id, fruit, amount):
         client_dict = self.amount_by_client_and_fruit.setdefault(client_id, {})
         new_item = fruit_item.FruitItem(fruit, int(amount))
-        client_dict[fruit] = client_dict.get(fruit, fruit_item.FruitItem(fruit, 0)) + new_item
-        self.client_processed_counts[client_id] = self.client_processed_counts.get(client_id, 0) + 1
+        client_dict[fruit] = client_dict.get(fruit, fruit_item.FruitItem(fruit, INITIAL_AMOUNT)) + new_item
+        self.client_processed_counts[client_id] = self.client_processed_counts.get(client_id, INITIAL_COUNT) + 1
         if client_id in self.pending_client_ids:
             self._flush_client_data(client_id)
 
@@ -84,7 +91,7 @@ class SumFilter:
                     [client_id, final_fruit_item.fruit, final_fruit_item.amount]
                 )
             )
-        messages_count = self.client_processed_counts.pop(client_id, 0)
+        messages_count = self.client_processed_counts.pop(client_id, INITIAL_COUNT)
         self.control_sender.send(
             message_protocol.internal.serialize([client_id, messages_count])
         )
@@ -94,7 +101,7 @@ class SumFilter:
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 3:
+        if len(fields) == DATA_MESSAGE_FIELDS:
             with self.state_lock:
                 self._process_data(*fields)
         else:
@@ -102,7 +109,7 @@ class SumFilter:
             total_messages = fields[1]
             logging.info(f"[Sum {ID}] Received EOF from Gateway (Total: {total_messages}). Broadcasting...")
             with self.state_lock:
-                self.client_expected_totals[client_id] = (int(total_messages), 0)
+                self.client_expected_totals[client_id] = (int(total_messages), INITIAL_COUNT)
             self.control_sender.send(
                 message_protocol.internal.serialize([client_id])
             )
@@ -111,17 +118,17 @@ class SumFilter:
     def process_control_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
 
-        if len(fields) == 1:
+        if len(fields) == CONTROL_START_EOF_FIELDS:
             client_id = fields[0]
             with self.state_lock:
                 self.pending_client_ids.add(client_id)
                 self._flush_client_data(client_id)
 
-        elif len(fields) == 2:
+        elif len(fields) == CONTROL_FRUIT_REPORT_FIELDS:
             client_id = fields[0]
-            amount_or_end = fields[1]
+            second_field = fields[1]
         
-            if amount_or_end == -1:
+            if second_field == EOF_ENDING:
                 logging.info(f"[Sum {ID}] Processing EOF completion for client: {client_id}")
                 with self.state_lock:
                     self.pending_client_ids.discard(client_id)
@@ -129,10 +136,11 @@ class SumFilter:
                 for data_output_exchange in self.data_output_exchanges:
                     data_output_exchange.send(eof_msg)
             else:
+                amount_to_add = second_field
                 with self.state_lock:
                     if client_id in self.client_expected_totals:
                         total_expected, current = self.client_expected_totals[client_id]
-                        new_count = current + amount_or_end
+                        new_count = current + amount_to_add
                         self.client_expected_totals[client_id] = (total_expected, new_count)
                         if new_count >= total_expected:
                             self.client_expected_totals.pop(client_id, None)
