@@ -67,6 +67,19 @@ class _MessageMiddlewareRabbitMQBase:
         except Exception as e:
             raise MessageMiddlewareMessageError(e) from e
 
+    def stop_consuming_threadsafe(self):
+        try:
+            if (
+                hasattr(self, self.ATTR_CONNECTION)
+                and self.connection
+                and self.connection.is_open
+            ):
+                self.connection.add_callback_threadsafe(self.stop_consuming)
+        except DISCONNECTION_ERRORS as e:
+            raise MessageMiddlewareDisconnectedError(DISCONNECTION_MSG.format(str(e))) from e
+        except Exception as e:
+            raise MessageMiddlewareMessageError(e) from e
+
     def close(self):
         try:
             if hasattr(self, self.ATTR_CHANNEL) and self.channel and self.channel.is_open:

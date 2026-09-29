@@ -55,18 +55,14 @@ class SumFilter:
         logging.info(f"[Sum {ID}] Received SIGTERM. Shutting down...")
         self.closed = True
         try:
-            if self.control_receiver and hasattr(self.control_receiver, 'connection') and self.control_receiver.connection.is_open:
-                self.control_receiver.connection.add_callback_threadsafe(
-                    self.control_receiver.stop_consuming
-                )
+            if self.control_receiver:
+                self.control_receiver.stop_consuming_threadsafe()
         except Exception as e:
             logging.error(f"[Sum {ID}] Error while stopping consumers: {e}")
 
         try:
-            if self.input_queue and hasattr(self.input_queue, 'connection') and self.input_queue.connection.is_open:
-                self.input_queue.connection.add_callback_threadsafe(
-                    self.input_queue.stop_consuming
-                )
+            if self.input_queue:
+                self.input_queue.stop_consuming_threadsafe()
         except Exception as e:
             logging.error(f"[Sum {ID}] Error while stopping consumers: {e}")
 
