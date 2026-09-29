@@ -1,8 +1,12 @@
 # Informe TP Coordinación - Pedro Ciliberto
 
-A continuación escibiré el informe del trabajo práctico de coordinación. En primer lugar, iré describiendo los cambios que realicé en el código de forma incremental, intentando cubrir paso por paso los escenarios descritos en la consigna.
+A continuación escibiré el informe del trabajo práctico de coordinación. En primer lugar, iré describiendo los cambios que realicé en el código de forma incremental, intentando cubrir paso por paso los **escenarios** descritos en la consigna. Luego, explicaré los **problemas de sincronización** que surgieron durante la implementación y cómo los resolví.
 
 ## Seguimiento de escenarios
+
+### Escenario 1: manejo de un único cliente
+
+Con este escenario se recibió el trabajo práctico. Lo único que podía hacer el sistema era procesar un único cliente, y lo único que hice fue **agregar mi implementación del Middleware** (traído de la entrega anterior).
 
 ### Escenario 2: manejo de múltiples clientes
 
@@ -36,7 +40,11 @@ Con la introducción de múltiples instancias de `Aggregation`, se hicieron las 
 - A diferencia de los mensajes de datos, la señal de **EOF** de cada instancia `Sum` se sigue enviando mediante *broadcast* a **todas** las instancias de `Aggregation`. Cada nodo de `Aggregation` espera recibir exactamente `SUM_AMOUNT` notificaciones por cada cliente para concluir esa partición.
 - Dado que cada `Aggregation` procesa un subconjunto disjunto de frutas, emite un **Top parcial** hacia el nodo `Join` (solo con las frutas que obtiene). Por eso, se adaptó `JoinFilter` de forma similar a lo hecho con las agregaciones en el escenario anterior: se mantiene un **contador por cliente** y acumula las respuestas parciales de las $M$ instancias (`AGGREGATION_AMOUNT`). Una vez recibidas los $M$ Tops, `JoinFilter` junta las tuplas, realiza un ordenamiento global y emite el Top definitivo hacia el `Gateway`.
 
-### Corrección de condición de carrera y sincronización en `Sum`
+### Escenario 5: Nombres al azar
+
+A lo largo de la implementación, siempre utilicé los nombres recibidos por las variables de entorno para las colas y *exchanges*. Esto permitió que el sistema fuera **independiente de los nombres de colas y exchanges** y que pueda ser ejecutado utilizando cualquier nombre arbitrario sin necesidad de modificar el código. Por ende, este escenario no requirió cambios adicionales.
+
+## Corrección de condición de carrera y sincronización en `Sum`
 
 Inicialmente, durante la ejecución de los escenarios se detectó una **condición de carrera (*race condition*)** en la sincronización de las instancias de `Sum`. Al trabajar directamente en el envio de conteos parciales (y de forma inmediata), existía el riesgo de que el nodo coordinador declarase el fin de la transmisión (**EOF**) antes de que los demás nodos terminasen de procesar y vaciar (*flush*) sus mensajes de datos desde `Gateway`, o que estos quedasen bloqueados esperándolos. Consecuentemente, algunas frutas procesadas por los nodos de `Sum` **no llegaban a `Aggregation`**, generando inconsistencias en los resultados finales de *tops*.
 
